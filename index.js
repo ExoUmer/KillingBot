@@ -355,7 +355,7 @@ class KillingBot {
                 this.instantLookAt(target)
                 this.bot.attack(target)
 
-                await this.delay(500)
+                await this.delay(700)
             } catch (err) {
                 this.log(`❌ Killing error: ${err.message}`)
                 await this.delay(500)
@@ -734,5 +734,6 @@ console.log('✅ Multi-Bot System Started!')
 console.log('- 1 Killing Bot (Active)')
 console.log('- 4 Idle Bots')
 console.log('================================')
+
 
 module.exports = { KillingBot, IdleBot }
