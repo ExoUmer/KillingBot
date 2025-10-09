@@ -8,6 +8,7 @@ class KillingBot {
             restart: null,
             reconnect: null
         }
+        this.timeouts = new Set() // Track all timeouts
         this.state = {
             isKilling: false,
             isReconnecting: false,
@@ -26,11 +27,18 @@ class KillingBot {
             maxReconnectDelay: 120 * 1000
         }
         this.allowedCommanders = [process.env.KILLER_ALLOWED]
+        this.messageListeners = new Set() // Track message listeners
         this.start()
     }
 
     async delay(ms) {
-        return new Promise(resolve => setTimeout(resolve, ms))
+        return new Promise(resolve => {
+            const timeout = setTimeout(resolve, ms)
+            this.timeouts.add(timeout)
+            timeout[Symbol.for('cleanup')] = () => {
+                this.timeouts.delete(timeout)
+            }
+        })
     }
 
     log(message) {
@@ -41,6 +49,13 @@ class KillingBot {
     cleanup() {
         this.log('🧹 Cleaning up resources...')
 
+        // Clear all timeouts
+        this.timeouts.forEach(timeout => {
+            clearTimeout(timeout)
+        })
+        this.timeouts.clear()
+
+        // Clear all intervals
         Object.keys(this.intervals).forEach(key => {
             if (key !== 'reconnect' && this.intervals[key]) {
                 clearInterval(this.intervals[key])
@@ -52,6 +67,12 @@ class KillingBot {
         this.state.isJoining = false
 
         if (this.bot) {
+            // Remove all tracked listeners
+            this.messageListeners.forEach(listener => {
+                this.bot.removeListener('message', listener)
+            })
+            this.messageListeners.clear()
+
             this.bot.removeAllListeners()
 
             try {
@@ -108,18 +129,16 @@ class KillingBot {
         this.cleanup()
         this.state.isReconnecting = false
 
-        this.intervals.reconnect = setInterval(() => {
+        // Use ONLY setTimeout, not both setInterval and setTimeout
+        const reconnectTimeout = setTimeout(() => {
+            this.timeouts.delete(reconnectTimeout)
             if (!this.state.isReconnecting && !this.bot) {
                 this.log('🔄 Attempting to reconnect...')
                 this.start()
             }
         }, delay)
-
-        setTimeout(() => {
-            if (!this.state.isReconnecting && !this.bot) {
-                this.start()
-            }
-        }, delay)
+        
+        this.timeouts.add(reconnectTimeout)
     }
 
     setupEventHandlers() {
@@ -192,11 +211,15 @@ class KillingBot {
             const windowPromise = new Promise((resolve, reject) => {
                 const timeout = setTimeout(() => {
                     this.bot.removeListener('windowOpen', onOpen)
+                    this.timeouts.delete(timeout)
                     reject(new Error('Menu open timeout'))
                 }, 5000)
+                
+                this.timeouts.add(timeout)
 
                 const onOpen = (window) => {
                     clearTimeout(timeout)
+                    this.timeouts.delete(timeout)
                     this.bot.removeListener('windowOpen', onOpen)
                     resolve(window)
                 }
@@ -228,6 +251,8 @@ class KillingBot {
             }
 
             this.state.isJoining = true
+            let listener = null
+            let timeout = null
 
             try {
                 this.log('⏳ Joining OneBlock...')
@@ -236,31 +261,53 @@ class KillingBot {
                 this.log('📌 Clicked OneBlock slot (14)')
 
                 let joined = false
-                const timeout = setTimeout(() => {
-                    if (!joined) {
+                
+                const cleanup = () => {
+                    if (timeout) {
+                        clearTimeout(timeout)
+                        this.timeouts.delete(timeout)
+                    }
+                    if (listener) {
                         this.bot.removeListener('message', listener)
+                        this.messageListeners.delete(listener)
+                    }
+                    this.state.isJoining = false
+                }
+
+                timeout = setTimeout(() => {
+                    if (!joined) {
+                        cleanup()
                         reject(new Error('Join timeout'))
                     }
                 }, 15000)
+                
+                this.timeouts.add(timeout)
 
-                const listener = (jsonMsg) => {
+                listener = (jsonMsg) => {
                     const text = jsonMsg.toString()
                     if (text.includes(`[+] ${this.config.username}`) || 
                         text.includes(`[+] [VOTER] ${this.config.username}`) || 
                         text.includes(`[+] [PRO] ${this.config.username}`) || 
                         text.includes(`[+] [LEGEND] ${this.config.username}`)) {
                         joined = true
-                        clearTimeout(timeout)
-                        this.bot.removeListener('message', listener)
-                        this.state.isJoining = false
+                        cleanup()
                         this.log('✅ Successfully joined OneBlock!')
                         resolve(true)
                     }
                 }
 
                 this.bot.on('message', listener)
+                this.messageListeners.add(listener)
             } catch (err) {
                 this.state.isJoining = false
+                if (listener) {
+                    this.bot.removeListener('message', listener)
+                    this.messageListeners.delete(listener)
+                }
+                if (timeout) {
+                    clearTimeout(timeout)
+                    this.timeouts.delete(timeout)
+                }
                 reject(err)
             }
         })
@@ -351,11 +398,10 @@ class KillingBot {
                     continue
                 }
 
-                // Instant rotation and attack
                 this.instantLookAt(target)
                 this.bot.attack(target)
 
-                await this.delay(700)
+                await this.delay(500)
             } catch (err) {
                 this.log(`❌ Killing error: ${err.message}`)
                 await this.delay(500)
@@ -424,6 +470,8 @@ class IdleBot {
             restart: null,
             reconnect: null
         }
+        this.timeouts = new Set()
+        this.messageListeners = new Set()
         this.state = {
             isReconnecting: false,
             isJoining: false,
@@ -431,8 +479,8 @@ class IdleBot {
         }
         this.config = {
             host: process.env[`IDLE${botNumber}_IP`] || process.env.KILLER_IP,
-            port: parseInt(process.env[`IDLE${botNumber}_PORT`]) || parseInt(process.env.KILLER_PORT),
-            username: process.env[`IDLE${botNumber}_USERNAME`] || `IdleBot${botNumber}`,
+            port: parseInt(process.env[`IDLE${botNumber}_PORT`]),
+            username: process.env[`IDLE${botNumber}_USERNAME`],
             version: process.env[`IDLE${botNumber}_VERSION`],
             password: process.env[`IDLE${botNumber}_PASSWORD`],
             restartInterval: 30 * 60 * 1000,
@@ -443,7 +491,10 @@ class IdleBot {
     }
 
     async delay(ms) {
-        return new Promise(resolve => setTimeout(resolve, ms))
+        return new Promise(resolve => {
+            const timeout = setTimeout(resolve, ms)
+            this.timeouts.add(timeout)
+        })
     }
 
     log(message) {
@@ -453,6 +504,9 @@ class IdleBot {
 
     cleanup() {
         this.log('🧹 Cleaning up resources...')
+
+        this.timeouts.forEach(timeout => clearTimeout(timeout))
+        this.timeouts.clear()
 
         Object.keys(this.intervals).forEach(key => {
             if (key !== 'reconnect' && this.intervals[key]) {
@@ -464,6 +518,11 @@ class IdleBot {
         this.state.isJoining = false
 
         if (this.bot) {
+            this.messageListeners.forEach(listener => {
+                this.bot.removeListener('message', listener)
+            })
+            this.messageListeners.clear()
+
             this.bot.removeAllListeners()
 
             try {
@@ -520,18 +579,15 @@ class IdleBot {
         this.cleanup()
         this.state.isReconnecting = false
 
-        this.intervals.reconnect = setInterval(() => {
+        const reconnectTimeout = setTimeout(() => {
+            this.timeouts.delete(reconnectTimeout)
             if (!this.state.isReconnecting && !this.bot) {
                 this.log('🔄 Attempting to reconnect...')
                 this.start()
             }
         }, delay)
-
-        setTimeout(() => {
-            if (!this.state.isReconnecting && !this.bot) {
-                this.start()
-            }
-        }, delay)
+        
+        this.timeouts.add(reconnectTimeout)
     }
 
     setupEventHandlers() {
@@ -596,11 +652,15 @@ class IdleBot {
             const windowPromise = new Promise((resolve, reject) => {
                 const timeout = setTimeout(() => {
                     this.bot.removeListener('windowOpen', onOpen)
+                    this.timeouts.delete(timeout)
                     reject(new Error('Menu open timeout'))
                 }, 5000)
+                
+                this.timeouts.add(timeout)
 
                 const onOpen = (window) => {
                     clearTimeout(timeout)
+                    this.timeouts.delete(timeout)
                     this.bot.removeListener('windowOpen', onOpen)
                     resolve(window)
                 }
@@ -631,6 +691,8 @@ class IdleBot {
             }
 
             this.state.isJoining = true
+            let listener = null
+            let timeout = null
 
             try {
                 this.log('⏳ Joining OneBlock...')
@@ -639,31 +701,53 @@ class IdleBot {
                 this.log('📌 Clicked OneBlock slot (14)')
 
                 let joined = false
-                const timeout = setTimeout(() => {
-                    if (!joined) {
+                
+                const cleanup = () => {
+                    if (timeout) {
+                        clearTimeout(timeout)
+                        this.timeouts.delete(timeout)
+                    }
+                    if (listener) {
                         this.bot.removeListener('message', listener)
+                        this.messageListeners.delete(listener)
+                    }
+                    this.state.isJoining = false
+                }
+
+                timeout = setTimeout(() => {
+                    if (!joined) {
+                        cleanup()
                         reject(new Error('Join timeout'))
                     }
                 }, 15000)
+                
+                this.timeouts.add(timeout)
 
-                const listener = (jsonMsg) => {
+                listener = (jsonMsg) => {
                     const text = jsonMsg.toString()
                     if (text.includes(`[+] ${this.config.username}`) || 
                         text.includes(`[+] [VOTER] ${this.config.username}`) || 
                         text.includes(`[+] [PRO] ${this.config.username}`) || 
                         text.includes(`[+] [LEGEND] ${this.config.username}`)) {
                         joined = true
-                        clearTimeout(timeout)
-                        this.bot.removeListener('message', listener)
-                        this.state.isJoining = false
+                        cleanup()
                         this.log('✅ Successfully joined OneBlock!')
                         resolve(true)
                     }
                 }
 
                 this.bot.on('message', listener)
+                this.messageListeners.add(listener)
             } catch (err) {
                 this.state.isJoining = false
+                if (listener) {
+                    this.bot.removeListener('message', listener)
+                    this.messageListeners.delete(listener)
+                }
+                if (timeout) {
+                    clearTimeout(timeout)
+                    this.timeouts.delete(timeout)
+                }
                 reject(err)
             }
         })
@@ -704,9 +788,6 @@ const bots = {
     idle4: new IdleBot(4)
 }
 
-// Store globally for shutdown handling
-global.allBots = bots
-
 // Handle process termination
 process.on('SIGINT', () => {
     console.log('\n🔚 Received SIGINT, shutting down all bots...')
@@ -734,6 +815,5 @@ console.log('✅ Multi-Bot System Started!')
 console.log('- 1 Killing Bot (Active)')
 console.log('- 4 Idle Bots')
 console.log('================================')
-
 
 module.exports = { KillingBot, IdleBot }
